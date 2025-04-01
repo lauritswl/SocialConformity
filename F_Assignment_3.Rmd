@@ -1,0 +1,335 @@
+---
+title: "Assignment 3"
+author: "Laurits Lyngbaek"
+date: "2025-03-18"
+output: html_document
+---
+**Load Packages**
+```{r}
+pacman::p_load(tidyverse, # Data Wrangling and Plotting
+               tidybayes, # Transforming posterior draws to tibbles
+               cmdstanr,  # Package for compiling Stan script from Rscript into C++  
+               posterior)
+```
+
+# Clean Data
+```{r}
+pre <- readr::read_csv(file = "Data/preCorona.csv")
+during <- readr::read_csv(file = "Data/duringCorona.csv") 
+```
+
+```{r}
+# Beta-binomial model for Bayesian integration in the marble task
+#
+# This function implements a Bayesian integration model for combining direct and social evidence
+# about the proportion of blue marbles in a jar. It uses the beta-binomial model, which is
+# particularly suitable for reasoning about proportions.
+#
+# Parameters:
+#   alpha_prior: Prior alpha parameter (conceptually: prior counts of x + 1)
+#   beta_prior: Prior beta parameter (conceptually: prior counts of y + 1)
+#   alpha_likelihood: Likelihood from direct evidence (counts of x, seen by you)
+#   total: Total direct evidence (x + y)
+#   alpha_likelihood_social: Likelihood from social evidence (counts of x, seen by other)
+#   total_social: Effective total marbles from social evidence (x+y)
+#
+# Returns:
+#   List with posterior parameters and statistics for decision-making
+betaBinomialModel <- function(alpha_prior, beta_prior, alpha_likelihood, total, alpha_likelihood_social, total_social) {
+  # Calculate red marbles for each source
+  beta_likelihood <- total - alpha_likelihood  # Number of red marbles in direct evidence
+  beta_likelihood_social <- total_social - alpha_likelihood_social # Inferred number of red marbles from social evidence
+  
+  # The key insight of Bayesian integration: simply add up all evidence counts
+  # This automatically gives more weight to sources with more data
+  alpha_post <- alpha_prior + alpha_likelihood + alpha_likelihood_social  # Posterior alpha (total blues + prior)
+  beta_post <- beta_prior + beta_likelihood + beta_likelihood_social      # Posterior beta (total reds + prior)
+  
+  # Calculate posterior statistics
+  expected_rate <- alpha_post / (alpha_post + beta_post)  # Mean of beta distribution
+  
+  # Variance has a simple formula for beta distributions
+  # Lower variance = higher confidence in our estimate
+  variance <- (alpha_post * beta_post) / 
+             ((alpha_post + beta_post)^2 * (alpha_post + beta_post + 1))
+  
+  # Calculate 95% credible interval using beta quantile functions
+  # This gives us bounds within which we believe the true proportion lies
+  ci_lower <- qbeta(0.025, alpha_post, beta_post)
+  ci_upper <- qbeta(0.975, alpha_post, beta_post)
+  
+  # Calculate confidence based on variance
+  # Higher variance = lower confidence; transform to 0-1 scale
+  confidence <- 1 - (2 * sqrt(variance))
+  confidence <- max(0, min(1, confidence))  # Bound between 0 and 1
+  
+  # Make decision based on whether expected rate exceeds 0.5
+  # If P(blue) > 0.5, choose blue; otherwise choose red
+  choice <- rbinom(1, size = total,prob=expected_rate )
+  
+  # Return all calculated parameters in a structured list
+  return(list(
+    alpha_post = alpha_post,
+    beta_post = beta_post,
+    expected_rate = expected_rate,
+    variance = variance,
+    ci_lower = ci_lower,
+    ci_upper = ci_upper,
+    confidence = confidence,
+    choice = choice
+  ))
+}
+```
+
+```{r}
+# Set total counts for direct and social evidence
+total <- 8  # Total evidence units in direct evidence
+total_social <- 8  # Total evidence units in social evidence
+
+# Create all possible combinations of direct and social evidence
+scenarios <- expand_grid(
+  alpha_likelihood = seq(0, 8, 1),  # Direct evidence: 0 to 8 blue marbles
+  alpha_likelihood_social = seq(1, 8, 2)   # Social evidence: 0, 2, 4, 6, 8 (confidence levels)
+) %>% mutate(
+  beta_likelihood = total - alpha_likelihood,  # Calculate red marbles for direct evidence
+  beta_likelihood_social = total_social - alpha_likelihood_social   # Calculate implied red marbles for social evidence
+)
+
+# Process all scenarios to generate summary statistics
+sim_data <- map_dfr(1:nrow(scenarios), function(i) {
+  # Extract scenario parameters
+  alpha_likelihood <- scenarios$alpha_likelihood[i]
+  beta_likelihood <- scenarios$beta_likelihood[i]
+  alpha_likelihood_social <- scenarios$alpha_likelihood_social[i]
+  beta_likelihood_social <- scenarios$beta_likelihood_social[i]
+  
+  # Calculate Bayesian integration using our model
+  result <- betaBinomialModel(10, 1, alpha_likelihood, total, alpha_likelihood_social, total_social)
+  
+  # Return summary data for this scenario
+  tibble(
+    alpha_likelihood = alpha_likelihood,
+    beta_likelihood = beta_likelihood,
+    alpha_likelihood_social = alpha_likelihood_social,
+    beta_likelihood_social = beta_likelihood_social,
+    expected_rate = result$expected_rate,
+    variance = result$variance,
+    ci_lower = result$ci_lower,
+    ci_upper = result$ci_upper,
+    choice = result$choice,
+    confidence = result$confidence
+  )
+})
+
+
+
+# Convert social evidence to meaningful labels for better visualization
+sim_data$trustability <- factor(sim_data$beta_likelihood_social,
+                                 levels = c(1, 3, 5, 7),
+                                 labels = c("Very Low", "Low", "Medium", "High"))
+
+# Function to prepare data for Stan
+prepare_stan_data <- function(df) {
+  list(
+    N = nrow(df),
+    choice = df$choice,
+    alpha_likelihood = df$alpha_likelihood,
+    total = df$alpha_likelihood+df$beta_likelihood,
+    alpha_likelihood_social = df$alpha_likelihood_social,
+    total_social = df$alpha_likelihood_social+df$beta_likelihood_social
+  )
+}
+
+# Prepare Data
+stan_sim_data <- prepare_stan_data(sim_data)
+```
+
+
+```{r}
+# Compile models
+mod_simple <- cmdstan_model(stan_file = "Bayes.stan", cpp_options = list(stan_threads = TRUE))
+
+
+# Fit simple model to each agent's data
+fit_simple_balanced <- mod_simple$sample(
+  data = stan_sim_data,
+  seed = 123,
+  chains = 2,
+  parallel_chains = 2,
+  threads_per_chain = 1,
+  iter_warmup = 1000,
+  iter_sampling = 1000,
+  refresh = 500  # Set to 500 or so to see progress
+)
+
+fit_simple_balanced
+
+```
+
+
+```{r}
+ggplot(sim_data, aes(x = alpha_likelihood, y = expected_rate, color = alpha_likelihood_social, group = alpha_likelihood_social))
+#playing around to visualise but not finished
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Trying the same stuff but with the weighted model, forgot to change some variable names, need to do that
+```{r}
+betaBinomialModel <- function(alpha_prior, beta_prior, 
+                              alpha_likelihood, total, 
+                              alpha_likelihood_social, total_social, 
+                              w_direct, w_social) {
+  # Calculate red marbles for each source
+  beta_likelihood <- total - alpha_likelihood  # Red marbles from direct evidence
+  beta_likelihood_social <- total_social - alpha_likelihood_social  # Red marbles from social evidence
+  
+  # Weighted Bayesian update
+  alpha_post <- alpha_prior + (w_direct * alpha_likelihood) + (w_social * alpha_likelihood_social)
+  beta_post  <- beta_prior + (w_direct * beta_likelihood) + (w_social * beta_likelihood_social)
+  
+  # Expected probability of blue marbles
+  expected_rate <- alpha_post / (alpha_post + beta_post)
+  
+  # Variance of beta distribution
+  variance <- (alpha_post * beta_post) / 
+              ((alpha_post + beta_post)^2 * (alpha_post + beta_post + 1))
+  
+  # 95% credible interval
+  ci_lower <- qbeta(0.025, alpha_post, beta_post)
+  ci_upper <- qbeta(0.975, alpha_post, beta_post)
+  
+  # Confidence (1 - variance scaling)
+  confidence <- 1 - (2 * sqrt(variance))
+  confidence <- max(0, min(1, confidence))  # Ensure within [0,1] range
+  
+  # Decision-making: Generate choice based on posterior probability
+  choice <- rbinom(1, size = total, prob = expected_rate)
+  
+  return(list(
+    alpha_post = alpha_post,
+    beta_post = beta_post,
+    expected_rate = expected_rate,
+    variance = variance,
+    ci_lower = ci_lower,
+    ci_upper = ci_upper,
+    confidence = confidence,
+    choice = choice
+  ))
+}
+
+
+
+```
+
+
+#### Updating the simulation with the weights
+```{r}
+# Define total counts for direct and social evidence
+total <- 8
+total_social <- 8
+
+# Create all possible evidence combinations
+scenarios <- expand_grid(
+  alpha_likelihood = seq(0, 8, 1),
+  alpha_likelihood_social = seq(1, 8, 2)  # Social evidence in steps of 2
+) %>% mutate(
+  beta_likelihood = total - alpha_likelihood,
+  beta_likelihood_social = total_social - alpha_likelihood_social
+)
+
+# Define weights , just trying different values right now
+w_direct <- 0.7  # More weight to direct evidence
+w_social <- 0.3  # Less weight to social evidence
+
+#we remove trustability labels because they were based on beta_likelihood, which assumes equal weighting, but the direct and social evidence are no longer fixed so we dont need them(???)
+
+#add how agents integrate evidence --> Riccardo = Balanced, self-focused, socially influenced
+
+
+# Process all scenarios
+sim_data <- map_dfr(1:nrow(scenarios), function(i) {
+  alpha_likelihood <- scenarios$alpha_likelihood[i]
+  beta_likelihood <- scenarios$beta_likelihood[i]
+  alpha_likelihood_social <- scenarios$alpha_likelihood_social[i]
+  beta_likelihood_social <- scenarios$beta_likelihood_social[i]
+  
+  result <- betaBinomialModel(10, 1, alpha_likelihood, total, 
+                              alpha_likelihood_social, total_social, 
+                              w_direct, w_social)
+  
+  tibble(
+    alpha_likelihood = alpha_likelihood,
+    beta_likelihood = beta_likelihood,
+    alpha_likelihood_social = alpha_likelihood_social,
+    beta_likelihood_social = beta_likelihood_social,
+    expected_rate = result$expected_rate,
+    variance = result$variance,
+    ci_lower = result$ci_lower,
+    ci_upper = result$ci_upper,
+    choice = result$choice,
+    confidence = result$confidence
+  )
+})
+
+```
+
+
+
+
+
+### Fitting the model
+```{r}
+# Compile models
+mod_weighted <- cmdstan_model(stan_file = "WeightedBayes.stan", cpp_options = list(stan_threads = TRUE))
+
+
+fit_weighted <- mod_weighted$sample(
+  data = stan_sim_data,
+  seed = 123,
+  chains = 2,
+  parallel_chains = 2,
+  threads_per_chain = 1,
+  iter_warmup = 1000,
+  iter_sampling = 1000,
+  refresh = 500
+)
+
+fit_weighted
+```
+
+
+
+
+
+
+
+
+
+
+
