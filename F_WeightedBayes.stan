@@ -6,7 +6,7 @@
 //we apply weights for the direct evidence and the social evidence
 data {
   int<lower=1> N;                      // Number of decisions
-  array[N] int<lower=0, upper=7> choice; // Choices (0=untrustworthy, 7=santa klaús)
+  array[N] int<lower=1, upper=8> choice; // Choices (0=untrustworthy, 7=santa klaús)
   array[N] int<lower=0> alpha_likelihood;         // Direct evidence (blue marbles)
   array[N] int<lower=0> total;        // Total direct evidence (total marbles)
   array[N] int<lower=0> alpha_likelihood_social;         // Social evidence (blue signals)
@@ -36,7 +36,7 @@ model {
     
     // Use beta_binomial distribution which integrates over all possible values
     // of the rate parameter weighted by their posterior probability
-    target += beta_binomial_lpmf(choice[i] | 7, alpha_post, beta_post);
+    target += beta_binomial_lpmf(choice[i] | 8, alpha_post, beta_post);
   }
 }
 
@@ -51,7 +51,7 @@ generated quantities {
   
   for (i in 1:N) {
     // For prior predictions, use uniform prior (Beta(1,1))
-    prior_pred_choice[i] = beta_binomial_rng(7, alpha_prior, beta_prior);
+    prior_pred_choice[i] = beta_binomial_rng(8, alpha_prior, beta_prior);
     
     // For posterior predictions, use integrated evidence
     real alpha_post = alpha_prior + w_direct * alpha_likelihood[i] + w_social * alpha_likelihood_social[i];

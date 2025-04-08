@@ -5,7 +5,7 @@
 // All evidence is taken at face value (equal weights)
 data {
   int<lower=1> N;                      // Number of decisions
-  array[N] int<lower=0, upper=10> choice; // Choices (0=untrustworthy, 7=santa klaús)
+  array[N] int<lower=1, upper=8> choice; // Choices (0=untrustworthy, 7=santa klaús)
   array[N] int<lower=0> alpha_likelihood;         // Direct evidence (blue marbles)
   array[N] int<lower=0> total;        // Total direct evidence (total marbles)
   array[N] int<lower=0> alpha_likelihood_social;         // Social evidence (blue signals)
@@ -47,17 +47,17 @@ generated quantities {
   
   for (i in 1:N) {
     // For prior predictions, use uniform prior (Beta(1,1))
-    prior_pred_choice[i] = beta_binomial_rng(10, alpha_prior, beta_prior);
+    prior_pred_choice[i] = beta_binomial_rng(8, alpha_prior, beta_prior);
     
     // For posterior predictions, use integrated evidence
     real alpha_post = alpha_prior + alpha_likelihood[i] + alpha_likelihood_social[i];
     real beta_post = beta_prior + (total[i] - alpha_likelihood[i]) + (total_social[i] - alpha_likelihood_social[i]);
     
     // Generate predictions using the complete beta-binomial model
-    posterior_pred_choice[i] = beta_binomial_rng(10, alpha_post, beta_post);
+    posterior_pred_choice[i] = beta_binomial_rng(8, alpha_post, beta_post);
     
     // Log likelihood calculation using beta-binomial
-    log_lik[i] = beta_binomial_lpmf(choice[i] | 10, alpha_post, beta_post);
+    log_lik[i] = beta_binomial_lpmf(choice[i] | 8, alpha_post, beta_post);
   }
 }
 
