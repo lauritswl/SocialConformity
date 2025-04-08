@@ -215,8 +215,8 @@ stan_pre_data <- list(
 fit_simple_real <- mod_simple$sample(
   data = stan_pre_data,
   seed = 123,
-  chains = 4,
-  parallel_chains = 4,
+  chains = 2,
+  parallel_chains = 2,
   threads_per_chain = 1,
   iter_warmup = 1000,
   iter_sampling = 1000,
@@ -346,12 +346,9 @@ factor(alpha_likelihood_social)), show.legend = FALSE) +
 # posterior weighted
 posterior_simple <- plot_predictive_checks(fit_simple_real, plot_data, "Simple", "posterior_pred_choice")
 ```
-```{r}
-posterior_simple
-```
 
 ```{r}
-mcmc_pairs(fit_simple_real$draws())
+posterior_simple
 ```
 
 

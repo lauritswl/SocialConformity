@@ -1,0 +1,738 @@
+---
+title: "F_Assignment_3_Iscia"
+output: html_document
+---
+
+**Load Packages**
+```{r}
+pacman::p_load(tidyverse, # Data Wrangling and Plotting
+               tidybayes, # Transforming posterior draws to tibbles
+               cmdstanr,  # Package for compiling Stan script from Rscript into C++  
+               posterior)
+```
+
+# Clean Data
+```{r}
+pre <- readr::read_csv(file = "Data/preCorona.csv")
+head(pre)
+```
+
+```{r}
+# Beta-binomial model for Bayesian integration in the marble task
+#
+# This function implements a Bayesian integration model for combining direct and social evidence
+# about the proportion of blue marbles in a jar. It uses the beta-binomial model, which is
+# particularly suitable for reasoning about proportions.
+#
+# Parameters:
+#   alpha_prior: Prior alpha parameter (conceptually: prior counts of x + 1)
+#   beta_prior: Prior beta parameter (conceptually: prior counts of y + 1)
+#   alpha_likelihood: Likelihood from direct evidence (counts of x, seen by you)
+#   total: Total direct evidence (x + y)
+#   alpha_likelihood_social: Likelihood from social evidence (counts of x, seen by other)
+#   total_social: Effective total marbles from social evidence (x+y)
+#
+# Returns:
+#   List with posterior parameters and statistics for decision-making
+weightedBetaBinomialModel <- function(alpha_prior, beta_prior,
+                              alpha_likelihood, total,
+                              alpha_likelihood_social, total_social,
+                              weight_direct, weight_social) {
+
+  # scale direct and social evidence by their weights
+  weigted_alpha_likelihood <- weight_direct * alpha_likelihood
+  weighted_alpha_likelihood_social <- weight_social * alpha_likelihood
+  
+  # Calculate beta from total and scale it
+  weighted_beta_likelihood <- weight_direct * (total - alpha_likelihood)
+  weighted_beta_likelihood_social <- weight_social * (total_social - alpha_likelihood_social) 
+  
+  # The key insight of Bayesian integration: simply add up all evidence counts
+  # This automatically gives more weight to sources with more data
+  alpha_post <- alpha_prior + weigted_alpha_likelihood + weighted_alpha_likelihood_social  # Posterior alpha (total blues + prior)
+  beta_post <- beta_prior + weighted_beta_likelihood + weighted_beta_likelihood_social      # Posterior beta (total reds + prior)
+  
+  # Calculate posterior statistics
+  expected_rate <- alpha_post / (alpha_post + beta_post)  # Mean of beta distribution
+  
+  # Variance has a simple formula for beta distributions
+  # Lower variance = higher confidence in our estimate
+  variance <- (alpha_post * beta_post) / 
+             ((alpha_post + beta_post)^2 * (alpha_post + beta_post + 1))
+  
+  # Calculate 95% credible interval using beta quantile functions
+  # This gives us bounds within which we believe the true proportion lies
+  ci_lower <- qbeta(0.025, alpha_post, beta_post)
+  ci_upper <- qbeta(0.975, alpha_post, beta_post)
+  
+  # Calculate confidence based on variance
+  # Higher variance = lower confidence; transform to 0-1 scale
+  confidence <- 1 - (2 * sqrt(variance))
+  confidence <- max(0, min(1, confidence))  # Bound between 0 and 1
+  
+  # Make decision based on whether expected rate exceeds 0.5
+  # If P(blue) > 0.5, choose blue; otherwise choose red
+  choice <- rbinom(1, size = total, prob=expected_rate)
+  #choice <- max(choice, 1e-5)
+  
+  # Return all calculated parameters in a structured list
+  return(list(
+    alpha_post = alpha_post,
+    beta_post = beta_post,
+    expected_rate = expected_rate,
+    variance = variance,
+    ci_lower = ci_lower,
+    ci_upper = ci_upper,
+    confidence = confidence,
+    choice = choice
+  ))
+}
+```
+
+# AGents with varying weigths
+```{r}
+# agent types with respective weights
+agents <- tibble(
+  agent_type = c("Balanced", "Self-Focused", "Socially-Influenced"),
+  weight_direct = c(1.0, 1.5, 0.7),    # Weight for direct evidence
+  weight_social = c(1.0, 0.5, 2.0)      # Weight for social evidence
+)
+```
+
+
+```{r}
+# Set total counts for direct and social evidence
+total <- 8  # Total evidence units in direct evidence
+total_social <- 8  # Total evidence units in social evidence
+
+# Create all possible combinations of direct and social evidence
+scenarios <- expand_grid(
+  alpha_likelihood = seq(0, 8, 1),  # Direct evidence: 0 to 8 blue marbles
+  alpha_likelihood_social = seq(1, 8, 2)   # Social evidence: 0, 2, 4, 6, 8 (confidence levels)
+) %>% mutate(
+  beta_likelihood = total - alpha_likelihood,  # Calculate red marbles for direct evidence
+  beta_likelihood_social = total_social - alpha_likelihood_social   # Calculate implied red marbles for social evidence
+)
+```
+
+# Generate Data for for all agents an scenarios
+```{r}
+all_agent_decisions <- function(agents, scenarios) {
+  results <- map_dfr(1:nrow(agents), function(i) {
+    # Extract agent parameters
+    agent_data <- agents[i, ]
+    
+    # Loop over all scenarios
+    decisions <- map_dfr(1:nrow(scenarios), function(j) {
+      # Extract scenario parameters
+      scenario_data <- scenarios[j, ]
+      
+      # Compute Bayesian integration with agent's weights
+      result <- weightedBetaBinomialModel(
+        alpha_prior = 10, beta_prior = 1,  # Example priors, adjust as needed
+        alpha_likelihood = scenario_data$alpha_likelihood, 
+        total = total,
+        alpha_likelihood_social = scenario_data$alpha_likelihood_social, 
+        total_social = total_social,
+        weight_direct = agent_data$weight_direct,
+        weight_social = agent_data$weight_social
+      )
+      
+      # Return a tibble with results, agent type, and scenario parameters
+      tibble(
+        agent_type = agent_data$agent_type,
+        scenario_id = j,
+        alpha_likelihood = scenario_data$alpha_likelihood,
+        beta_likelihood = scenario_data$beta_likelihood,
+        alpha_likelihood_social = scenario_data$alpha_likelihood_social,
+        beta_likelihood_social = scenario_data$beta_likelihood_social,
+        expected_rate = result$expected_rate,
+        variance = result$variance,
+        ci_lower = result$ci_lower,
+        ci_upper = result$ci_upper,
+        choice = result$choice,
+        confidence = result$confidence,
+        trusability = factor(scenario_data$beta_likelihood_social,
+                                 levels = c(1, 3, 5, 7),
+                                 labels = c("Very Low", "Low", "Medium", "High"))
+      )
+    })
+    return(decisions)
+  })
+  
+  return(results)
+}
+
+sim_results <- all_agent_decisions(agents, scenarios)
+
+```
+
+
+
+
+
+
+# Data of each agent
+```{r}
+# split data by agent type
+balanced_data <- sim_results %>% filter(agent_type=="Balanced")
+self_focused_data <- sim_results %>% filter(agent_type=="Self-Focused")
+socially_influenced_data <- sim_results %>% filter(agent_type=="Socially-Influenced")
+
+
+# Function to prepare data for Stan
+prepare_stan_data <- function(df) {
+  list(
+    N = nrow(df),
+    choice = df$choice,
+    alpha_likelihood = df$alpha_likelihood,
+    total = df$alpha_likelihood+df$beta_likelihood,
+    alpha_likelihood_social = df$alpha_likelihood_social,
+    total_social = df$alpha_likelihood_social+df$beta_likelihood_social
+  )
+}
+
+# Prepare Stan data for each agent
+stan_data_balanced <- prepare_stan_data(balanced_data)
+stan_data_self_focused <- prepare_stan_data(self_focused_data)
+stan_data_socially_influenced <- prepare_stan_data(socially_influenced_data)
+```
+
+
+# Compile all weighted models respectivly
+```{r}
+# Compile models
+mod_weighted <- cmdstan_model(stan_file = "F_WeightedBayes_iscia.stan", cpp_options = list(stan_threads = TRUE))
+
+
+# stan for weigthed balanced
+samples_weighted_balanced <- mod_weighted$sample(
+  data = stan_data_balanced,
+  seed = 123,
+  chains = 2,
+  parallel_chains = 2,
+  threads_per_chain = 1,
+  iter_warmup = 1000,
+  iter_sampling = 1000,
+  refresh = 0,
+  #max_treedepth = 20,
+  #adapt_delta = 0.99,
+)
+
+# stan for weighted self-focused
+samples_weighted_self_focused <- mod_weighted$sample(
+  data = stan_data_self_focused,
+  seed = 123,
+  chains = 2,
+  parallel_chains = 2,
+  threads_per_chain = 1,
+  iter_warmup = 1000,
+  iter_sampling = 1000,
+  refresh = 0,
+  #max_treedepth = 20,
+  #adapt_delta = 0.99,
+)
+
+# stan for weighted socially infleunced
+samples_weighted_socially_influenced <- mod_weighted$sample(
+  data = stan_data_socially_influenced,
+  seed = 123,
+  chains = 2,
+  parallel_chains = 2,
+  threads_per_chain = 1,
+  iter_warmup = 1000,
+  iter_sampling = 1000,
+  refresh = 0,
+  #max_treedepth = 20,
+  #adapt_delta = 0.99,
+)
+
+```
+
+
+```{r}
+library(patchwork)
+
+# create trace & rank plots 
+# Function to create trace and rank plots for a model
+create_diagnostic_plots <- function(fit, model_name) {
+  # Extract posterior draws
+  draws <- as_draws_df(fit$draws()) 
+  
+  trace_data <- data.frame(
+    Iteration = rep(1:1000,2),
+    Chain = draws$.chain,
+    alpha_prior = draws$alpha_prior,
+    beta_prior = draws$beta_prior,
+    w_direct = draws$w_direct,
+    w_social = draws$w_social
+  )
+  
+  # Create trace plot
+  trace_plot1 <- ggplot(trace_data, aes(x = Iteration, y = w_direct, color = factor(Chain))) +
+    geom_line() +
+    labs(title = paste("Trace Plot for weight_direct"),
+         x = "Iteration",
+         y = "weight_direct",
+         color = "Chain") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  
+  trace_plot2 <- ggplot(trace_data, aes(x = Iteration, y = w_social, color = factor(Chain))) +
+    geom_line() +
+    labs(title = paste("Trace Plot for weight_social"),
+         x = "Iteration",
+         y = "weight_direct",
+         color = "Chain") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+  trace_plot3 <- ggplot(trace_data, aes(x = Iteration, y = alpha_prior, color = factor(Chain))) +
+    geom_line() +
+    labs(title = paste("Trace Plot for alpha_prior"),
+         x = "Iteration",
+         y = "weight_direct",
+         color = "Chain") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+  trace_plot4 <- ggplot(trace_data, aes(x = Iteration, y = beta_prior, color = factor(Chain))) +
+    geom_line() +
+    labs(title = paste("Trace Plot for beta_prior"),
+         x = "Iteration",
+         y = "weight_direct",
+         color = "Chain") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  
+  # Combine plots using patchwork
+  combined_trace_plot <- (trace_plot1 + trace_plot2) / (trace_plot3 + trace_plot4)
+ 
+    #plot_annotation(title = paste("Trace Plots for", model_name))
+  
+  
+  # Return the plots
+  return(combined_trace_plot)
+}
+```
+
+# Generate diagnostic plots for each model
+```{r}
+create_diagnostic_plots(samples_weighted_balanced, "Balanced Model")
+```
+
+```{r}
+create_diagnostic_plots(samples_weighted_self_focused, "Self-focused Model")
+```
+
+```{r}
+create_diagnostic_plots(samples_weighted_socially_influenced, "Socially influenced Model")
+```
+
+
+
+
+
+```{r}
+library(ggpubr)
+
+# Histograms for real Pre-Corona data
+p1 <- pre %>%
+  ggplot(aes(x = FirstRating)) +
+  geom_density(adjust=1.5, fill = 'darkblue', alpha = 0.6) +
+  theme_bw() +
+  xlim(1,8) +
+  ylim(0, 0.3) +
+  labs(title = "First Rating", x = "Rating")
+
+p2 <- pre %>%
+  ggplot(aes(x = GroupRating)) +
+  geom_density(adjust=1.5, fill = 'darkred', alpha = 0.6) +
+  theme_bw() +
+  xlim(1,8) +
+  ylim(0, 0.3) +
+  labs(title = "Group Rating", x = "Rating")
+
+p3 <- pre %>%
+  ggplot(aes(x = SecondRating)) +
+  geom_density(adjust = 1.5, fill = 'darkorchid4', alpha = 0.8) +
+  theme_bw() +
+  xlim(1,8) +
+  ylim(0, 0.3) +
+  labs(title = "Second Rating", x = "Rating")
+
+# Combine into one figure
+figure <- ggarrange(p1, p2, p3,
+                    ncol = 3, nrow = 1)
+
+figure
+
+```
+
+
+### Fitting the models to the real data
+
+```{r}
+#firstly we need to remove the zeros in the group rating
+
+pre <- pre %>% filter(GroupRating > 0)
+
+```
+
+
+```{r}
+# Filter out rows where rating is 0
+clean_pre_df <- pre %>%
+  filter(FirstRating > 0,
+         GroupRating > 0,
+         SecondRating > 0)
+
+# prepre for stan
+stan_pre_data <- list(
+  N = nrow(clean_pre_df),
+  choice = clean_pre_df$SecondRating,
+  alpha_likelihood = clean_pre_df$FirstRating,
+  total = rep(8, nrow(clean_pre_df)),  # assuming 8 marbles for everyone
+  alpha_likelihood_social = clean_pre_df$GroupRating,
+  total_social = rep(8, nrow(clean_pre_df))  # assuming 8 social inputs
+)
+
+```
+
+
+
+
+```{r}
+# Compile models
+mod_weighted <- cmdstan_model(stan_file = "F_WeightedBayes_iscia.stan", cpp_options = list(stan_threads = TRUE))
+
+
+# stan for weigthed balanced
+fit_real <- mod_weighted$sample(
+  data = stan_pre_data,
+  seed = 123,
+  chains = 2,
+  parallel_chains = 2,
+  threads_per_chain = 1,
+  iter_warmup = 1000,
+  iter_sampling = 1000,
+  refresh = 0,
+  #max_treedepth = 20,
+  #adapt_delta = 0.99,
+)
+
+```
+
+
+
+
+
+
+```{r}
+library(patchwork)
+
+# create trace & rank plots 
+# Function to create trace and rank plots for a model
+create_diagnostic_plots <- function(fit, model_name) {
+  # Extract posterior draws
+  draws <- as_draws_df(fit$draws()) 
+  
+  trace_data <- data.frame(
+    Iteration = rep(1:1000,2),
+    Chain = draws$.chain,
+    alpha_prior = draws$alpha_prior,
+    beta_prior = draws$beta_prior,
+    w_direct = draws$w_direct,
+    w_social = draws$w_social
+  )
+  
+  # Create trace plot
+  trace_plot1 <- ggplot(trace_data, aes(x = Iteration, y = w_direct, color = factor(Chain))) +
+    geom_line() +
+    labs(title = paste("Trace Plot for weight_direct"),
+         x = "Iteration",
+         y = "weight_direct",
+         color = "Chain") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  
+  trace_plot2 <- ggplot(trace_data, aes(x = Iteration, y = w_social, color = factor(Chain))) +
+    geom_line() +
+    labs(title = paste("Trace Plot for weight_social"),
+         x = "Iteration",
+         y = "weight_direct",
+         color = "Chain") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+  trace_plot3 <- ggplot(trace_data, aes(x = Iteration, y = alpha_prior, color = factor(Chain))) +
+    geom_line() +
+    labs(title = paste("Trace Plot for alpha_prior"),
+         x = "Iteration",
+         y = "weight_direct",
+         color = "Chain") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+  trace_plot4 <- ggplot(trace_data, aes(x = Iteration, y = beta_prior, color = factor(Chain))) +
+    geom_line() +
+    labs(title = paste("Trace Plot for beta_prior"),
+         x = "Iteration",
+         y = "weight_direct",
+         color = "Chain") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  
+  # Combine plots using patchwork
+  combined_trace_plot <- (trace_plot1 + trace_plot2) / (trace_plot3 + trace_plot4)
+ 
+    #plot_annotation(title = paste("Trace Plots for", model_name))
+  
+  
+  # Return the plots
+  return(combined_trace_plot)
+}
+```
+
+
+```{r}
+create_diagnostic_plots(samples_weighted_balanced, "Real Data")
+```
+
+
+
+```{r}
+rename_pre <- clean_pre_df %>% 
+  rename(
+    alpha_likelihood = FirstRating,
+    choice = SecondRating,
+    alpha_likelihood_social = GroupRating
+  )
+
+# prepre for stan
+# stan_pre_data <- list(
+#   N = nrow(clean_pre_df),
+#   choice = clean_pre_df$SecondRating,
+#   alpha_likelihood = clean_pre_df$FirstRating,
+#   total = rep(8, nrow(clean_pre_df)),  # assuming 8 marbles for everyone
+#   alpha_likelihood_social = clean_pre_df$GroupRating,
+#   total_social = rep(8, nrow(clean_pre_df))  # assuming 8 social inputs
+# )
+
+
+
+```
+
+
+
+
+```{r}
+library(dplyr)
+plot_predictive_checks <- function(stan_fit,
+                                   sim_results,
+                                   model_name = "Simple Balanced",
+                                   param_name = "prior_pred_choice"){
+  # extract predicitve samples
+  pred_samples <- stan_fit$draws(param_name, format="data.frame")
+  
+  #get number of samples and observations
+  #n_samples <- nrow(pred_samples)
+  #n_obs <- ncol(pred_samples) -3       # why 3?
+  
+  # conver to long fromat
+  long_pred <- pred_samples %>% 
+    dplyr::select(-.chain, -.iteration, -.draw) %>%
+    pivot_longer(
+      cols = everything(),
+      names_to = "obs_id",
+      values_to = "choice"
+    ) %>%
+    mutate(obs_id = parse_number(obs_id))
+  
+  # Join with the original simulation data to get evidence levels
+  # First, add an observation ID to the simulation data
+  sim_with_id <- sim_results %>%
+    mutate(obs_id = row_number())
+  
+  # Join predictions with evidence levels
+  long_pred_with_evidence <- long_pred %>%
+    left_join(
+      sim_with_id %>%
+        dplyr::select(obs_id, alpha_likelihood, alpha_likelihood_social),
+      by = "obs_id"
+    )
+  
+    # Summarize proportion of 1s per evidence combination
+  pred_summary <- long_pred_with_evidence %>%
+    group_by(alpha_likelihood, alpha_likelihood_social) %>%
+    summarize(
+      # proportion = mean(choice, na.rm = TRUE), 
+      # n = n(),  
+      # se = sqrt((proportion * (1 - proportion)) / n),  # Binomial SE
+      # lower = proportion - 1.96 * se,  
+      # upper = proportion + 1.96 * se,
+      proportion = mean(choice),
+      lower = quantile(choice, 0.025),
+      upper = quantile(choice, 0.975),
+      .groups = "drop"
+    )
+  
+  # Generate title based on parameter name
+  title <- ifelse(param_name == "prior_pred_choice", 
+                  paste0("Prior Predictive Check for ", model_name),
+                  paste0("Posterior Predictive Check for ", model_name))
+
+ # Create plot
+ggplot(pred_summary, aes(x = alpha_likelihood, y = proportion, color =
+factor(alpha_likelihood_social)), show.legend = FALSE) +
+    geom_line(show.legend = FALSE) +
+    geom_point(show.legend = FALSE) +
+    geom_ribbon(aes(ymin = lower, ymax = upper, fill = factor(alpha_likelihood_social)), alpha = 0.2, color = NA) +
+    labs(
+      title = title,
+      x = "Direct Evidence (alpha_likelihood)",
+      y = "Proportion of Choice",
+      fill = "Social Evidence"
+    ) +
+    theme_minimal()
+}
+```
+
+
+
+```{r}
+plot <- plot_predictive_checks(fit_real,
+                               rename_pre,
+                               model_name = "Real Weighted",
+                               param_name = "prior_pred_choice")
+```
+
+```{r}
+plot
+```
+
+
+
+```{r}
+# Load the loo package
+library(loo)
+
+# Function to extract log-likelihood and compute LOO
+compute_loo <- function(model_fit) {
+  # Extract log-likelihood values
+  log_lik <- model_fit$draws("log_lik", format = "matrix")
+  
+  # Compute LOO-CV using PSIS
+  loo_result <- loo(log_lik)
+  return(loo_result)
+}
+
+# Compute LOO for each model and scenario
+loo_simple <- compute_loo(fit_simple_real)
+loo_simple_weighted <- compute_loo(fit_real)
+```
+
+```{r}
+loo_simple
+loo_simple_weighted
+```
+
+
+
+
+```{r}
+
+# Function to check Pareto k diagnostics
+check_pareto_k <- function(loo_result, model_name) {
+  # Extract Pareto k values
+  pareto_k <- loo_result$diagnostics$pareto_k
+  
+  # Count problematic k values
+  n_k_high <- sum(pareto_k > 0.7)
+  n_k_medium <- sum(pareto_k > 0.5 & pareto_k <= 0.7)
+  
+  # Proportion of problematic observations
+  prop_problematic <- (n_k_high + n_k_medium) / length(pareto_k)
+  
+  # Create diagnostic summary
+  summary_df <- tibble(
+    model = model_name,
+    total_obs = length(pareto_k),
+    k_high = n_k_high,
+    k_medium = n_k_medium,
+    prop_problematic = prop_problematic,
+    reliability = case_when(
+      prop_problematic == 0 ~ "Excellent",
+      prop_problematic < 0.05 ~ "Good",
+      prop_problematic < 0.1 ~ "Fair",
+      TRUE ~ "Poor"
+    )
+  )
+  
+  return(summary_df)
+}
+
+# Check diagnostics for all models
+diagnostics <- bind_rows(
+  check_pareto_k(loo_simple, "Simple"),
+  check_pareto_k(loo_simple_weighted, "Weighted")
+)
+
+# Display diagnostics table
+knitr::kable(diagnostics, 
+             digits = 3,
+             caption = "PSIS-LOO Reliability Diagnostics")
+```
+
+
+
+
+```{r}
+# Function to compare models and create visualization
+compare_scenario_models <- function(loo_simple, loo_weighted, scenario_name) {
+  # Compare models
+  comparison <- loo_compare(loo_simple, loo_weighted)
+  
+  # Calculate model weights
+  weights <- loo_model_weights(list(
+    "Simple Bayesian" = loo_simple,
+    "Weighted Bayesian" = loo_weighted
+  ))
+  
+  # Print comparison
+  cat("\nModel comparison for", scenario_name, "scenario:\n")
+  print(comparison)
+  
+  # Print weights
+  cat("\nModel weights for", scenario_name, "scenario:\n")
+  print(weights)
+  
+  # Create comparison dataframe
+  comparison_df <- as.data.frame(comparison)
+  comparison_df$model <- rownames(comparison_df)
+  rownames(comparison_df) <- NULL
+  comparison_df$scenario <- scenario_name
+  
+  # Create weights dataframe
+  weights_df <- tibble(
+    model = names(weights),
+    weight = as.numeric(weights),
+    scenario = scenario_name
+  )
+  
+  # Return both dataframes
+  return(list(comparison = comparison_df, weights = weights_df))
+}
+
+# Perform comparisons for each scenario
+balanced_comparison <- compare_scenario_models(
+  loo_simple, loo_simple_weighted, "Comparison"
+)
+```
+
+
+
+
+
+
+
