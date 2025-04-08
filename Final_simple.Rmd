@@ -167,68 +167,7 @@ fit_simple_balanced
 
 ```
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#### Fitting the real data
-```{r}
-# Filter out rows where rating is 0
-clean_pre_df <- pre %>%
-  filter(FirstRating > 0,
-         GroupRating > 0,
-         SecondRating > 0)
-
-# prepre for stan
-stan_pre_data <- list(
-  N = nrow(clean_pre_df),
-  choice = clean_pre_df$SecondRating,
-  alpha_likelihood = clean_pre_df$FirstRating,
-  total = rep(8, nrow(clean_pre_df)),
-  alpha_likelihood_social = clean_pre_df$GroupRating,
-  total_social = rep(8, nrow(clean_pre_df))
-)
-
-```
-
-
-
-
-```{r}
-fit_simple_real <- mod_simple$sample(
-  data = stan_pre_data,
-  seed = 123,
-  chains = 2,
-  parallel_chains = 2,
-  threads_per_chain = 1,
-  iter_warmup = 1000,
-  iter_sampling = 1000,
-  refresh = 500
-)
-
-```
-
-
-
-
-
+#### Traceplots
 ```{r}
 create_diagnostic_plots <- function(fit) {
   # Extract posterior draws
@@ -260,10 +199,30 @@ create_diagnostic_plots <- function(fit) {
 ```
 
 
-```{r}
-create_diagnostic_plots(fit_simple_real)
 
+
+```{r}
+create_diagnostic_plots(fit_simple_balanced)
 ```
+
+
+
+### Preparing data frame
+```{r}
+# Filter out rows where rating is 0
+clean_pre_df <- pre %>%
+  filter(FirstRating > 0,
+         GroupRating > 0,
+         SecondRating > 0)
+
+rename_pre <- clean_pre_df %>% 
+  rename(
+    alpha_likelihood = FirstRating,
+    choice = SecondRating,
+    alpha_likelihood_social = GroupRating
+  )
+```
+
 
 
 ### Prior-Posterior predictive checks
@@ -341,10 +300,80 @@ factor(alpha_likelihood_social)), show.legend = FALSE) +
 ```
 
 
+
+
 ```{r}
 # posterior simple
 # posterior weighted
-posterior_simple <- plot_predictive_checks(fit_simple_real, plot_data, "Simple", "posterior_pred_choice")
+posterior_simple <- plot_predictive_checks(fit_simple_balanced, sim_data, "Simple Sim", "posterior_pred_choice")
+```
+
+```{r}
+posterior_simple
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Fitting the real data
+```{r}
+# Filter out rows where rating is 0
+clean_pre_df <- pre %>%
+  filter(FirstRating > 0,
+         GroupRating > 0,
+         SecondRating > 0)
+
+# prepre for stan
+stan_pre_data <- list(
+  N = nrow(clean_pre_df),
+  choice = clean_pre_df$SecondRating,
+  alpha_likelihood = clean_pre_df$FirstRating,
+  total = rep(8, nrow(clean_pre_df)),
+  alpha_likelihood_social = clean_pre_df$GroupRating,
+  total_social = rep(8, nrow(clean_pre_df))
+)
+
+```
+
+
+
+
+```{r}
+fit_simple_real <- mod_simple$sample(
+  data = stan_pre_data,
+  seed = 123,
+  chains = 2,
+  parallel_chains = 2,
+  threads_per_chain = 1,
+  iter_warmup = 1000,
+  iter_sampling = 1000,
+  refresh = 500
+)
+
+```
+
+#### Traceplot
+```{r}
+create_diagnostic_plots(fit_simple_real)
+
+```
+
+
+#### Prior Posterior Update Checks
+```{r}
+# posterior simple
+# posterior weighted
+posterior_simple <- plot_predictive_checks(fit_simple_real, rename_pre, "Simple", "posterior_pred_choice")
 ```
 
 ```{r}
